@@ -641,13 +641,13 @@ function parseV4a(lines: string[]): VSection[] {
       const path = l.slice('*** Update File: '.length).trim();
       const startLine = i + 1;
       i += 1;
-      const raw: string[] = [];
+      const raw: Array<{ line: number; text: string }> = [];
       let stopAt = i;
       while (stopAt < last && !isSectionHead(lines[stopAt]!)) {
-        raw.push(lines[stopAt]!);
+        raw.push({ line: stopAt + 1, text: lines[stopAt]! });
         stopAt += 1;
       }
-      while (raw.length > 0 && blank(raw[raw.length - 1]!)) raw.pop();
+      while (raw.length > 0 && blank(raw[raw.length - 1]!.text)) raw.pop();
       const sec = parseUpdateBody(raw, startLine, path);
       sections.push(sec);
       i = stopAt;
@@ -666,44 +666,49 @@ function parseV4a(lines: string[]): VSection[] {
 const isSectionHead = (l: string): boolean =>
   l.startsWith('*** Add File: ') || l.startsWith('*** Delete File: ') || l.startsWith('*** Update File: ');
 
-/** The Update File section a raw body names; any other line inside it is a parse fault. */
-function parseUpdateBody(raw: string[], startLine: number, path: string): VSection {
+/** The Update File section a raw body names; any other line inside it is a parse fault.
+ *  The first chunk may open at a body line; every later chunk opens at `@@`, and `*** End of File` closes one. */
+function parseUpdateBody(raw: Array<{ line: number; text: string }>, startLine: number, path: string): VSection {
   let moveTo: string | null = null;
   let j = 0;
-  if (raw.length > 0 && raw[0]!.startsWith('*** Move to: ')) {
-    moveTo = raw[0]!.slice('*** Move to: '.length).trim();
+  if (raw.length > 0 && raw[0]!.text.startsWith('*** Move to: ')) {
+    moveTo = raw[0]!.text.slice('*** Move to: '.length).trim();
     j = 1;
   }
   const chunks: Chunk[] = [];
   let cur: Chunk | null = null;
+  let afterEof = false;
   const push = (): void => {
     if (cur !== null) chunks.push(cur);
     cur = null;
   };
   while (j < raw.length) {
-    const l = raw[j]!;
-    if (l.startsWith('@@')) {
+    const { line, text } = raw[j]!;
+    if (text.startsWith('@@')) {
       push();
-      cur = { anchor: l.slice(2).trim(), eof: false, body: [] };
-      if (cur.anchor === '') cur.anchor = null;
+      const anchor = text.slice(2).trim();
+      cur = { anchor: anchor === '' ? null : anchor, eof: false, body: [] };
+      afterEof = false;
       j += 1;
       continue;
     }
-    if (l.trim() === '*** End of File') {
-      if (cur === null) throw new Exit2(`error: parse ${startLine + j + 1}`);
+    if (text === '*** End of File') {
+      if (cur === null) throw new Exit2(`error: parse ${line}`);
       cur.eof = true;
       push();
+      afterEof = true;
       j += 1;
       continue;
     }
-    if (isBodyStart(l)) {
+    if (isBodyStart(text)) {
+      if (afterEof) throw new Exit2(`error: parse ${line}`);
       if (cur === null) cur = { anchor: null, eof: false, body: [] };
-      if (l === '') cur.body.push({ kind: ' ', text: '' });
-      else cur.body.push({ kind: l[0] as BodyKind, text: l.slice(1) });
+      if (text === '') cur.body.push({ kind: ' ', text: '' });
+      else cur.body.push({ kind: text[0] as BodyKind, text: text.slice(1) });
       j += 1;
       continue;
     }
-    throw new Exit2(`error: parse ${startLine + j + 1}`);
+    throw new Exit2(`error: parse ${line}`);
   }
   push();
   if (moveTo === null && chunks.length === 0) throw new Exit2(`error: parse ${startLine}`);

@@ -68,6 +68,8 @@ function writeModel(m: Model): string {
   return m.lines.length === 0 ? '' : m.lines.join(m.br) + (m.final ? m.br : '');
 }
 
+/** Trailing whitespace removed, as section 4 and section 7 read a marker line. */
+const trimEndWs = (s: string): string => s.trimEnd();
 const leadingWs = (s: string): string => /^[ \t]*/.exec(s)![0];
 const stripTail = (s: string): string => s.replace(/[ \t]+$/, '');
 const stripBoth = (s: string): string => s.replace(/^[ \t]+|[ \t]+$/g, '');
@@ -203,7 +205,7 @@ function detect(lines: string[]): string | null {
   if (lines[first]!.trim() === '*** Begin Patch') return 'v4a';
   const c = lines[first]!.trimStart()[0];
   if (c === '[' || c === '{') return 'json';
-  if (lines.some((l) => stripTail(l) === '<<<<<<< SEARCH')) return 'search-replace';
+  if (lines.some((l) => trimEndWs(l) === '<<<<<<< SEARCH')) return 'search-replace';
   if (lines.some((l, i) => l.startsWith('diff --git ') || (l.startsWith('--- ') && (lines[i + 1] ?? '').startsWith('+++ ')))) return 'unified';
   return null;
 }
@@ -219,7 +221,10 @@ function diffGitPaths(l: string, lineNo: number): [string, string] {
   if (!rest.startsWith('a/')) throw new Exit2(`error: parse ${lineNo}`);
   const sep = rest.indexOf(' b/');
   if (sep < 0) throw new Exit2(`error: parse ${lineNo}`);
-  return [rest.slice(2, sep), rest.slice(sep + 3)];
+  const x = rest.slice(2, sep);
+  const y = rest.slice(sep + 3);
+  if (x === '' || y === '') throw new Exit2(`error: parse ${lineNo}`);
+  return [x, y];
 }
 
 /** A `--- <path>` or `+++ <path>` header's path: after 4 characters, up to the first tab, trimmed,
@@ -289,9 +294,10 @@ function hunkBody(lines: string[], start: number): { body: Body[]; next: number 
     break;
   }
   let stop = end;
+  // Only empty lines (`""`) at the end of a body are not part of it. A `' '` line is a context line
+  // whose text is empty, which is body, so it stays.
   while (stop > start) {
-    const l = lines[stop - 1]!;
-    if (l === '' || l === ' ') stop -= 1;
+    if (lines[stop - 1] === '') stop -= 1;
     else break;
   }
   const body: Body[] = [];
@@ -375,8 +381,7 @@ function parseUnified(lines: string[]): USection[] {
         cur!.del = true;
         i += 1;
         continue;
-      }
-      i += 1;
+      }      i += 1;
       continue;
     }
     if (l.startsWith('--- ') && (lines[i + 1] ?? '').startsWith('+++ ')) {
@@ -448,7 +453,9 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
     const { oldPath, newPath } = sectionPaths(s);
     if (s.create || oldPath === null) {
       return (tree: Tree): void => {
-        const p = newPath!;
+        // A section that names no file on either side (`--- /dev/null` with `+++ /dev/null`) has
+        // no path to write: report the path it names, as `unsafe`, rather than crash.
+        const p = newPath ?? '';
         if (!safe(p)) throw new Fail('unsafe', p);
         if (tree.get(p) !== null) throw new Fail('exists', p);
         tree.now.set(p, createdText(s.hunks));
@@ -506,7 +513,7 @@ function parseSearchReplace(lines: string[]): SRBlock[] {
   let prevEnd = 0;
   let i = 0;
   while (i < n) {
-    if (stripTail(lines[i]!) !== '<<<<<<< SEARCH') {
+    if (trimEndWs(lines[i]!) !== '<<<<<<< SEARCH') {
       i += 1;
       continue;
     }
@@ -524,7 +531,7 @@ function parseSearchReplace(lines: string[]): SRBlock[] {
     if (path === null) throw new Exit2(`error: parse ${searchLine}`);
     let sep = -1;
     for (let j = i + 1; j < n; j += 1) {
-      if (stripTail(lines[j]!) === '=======') {
+      if (trimEndWs(lines[j]!) === '=======') {
         sep = j;
         break;
       }
@@ -532,7 +539,7 @@ function parseSearchReplace(lines: string[]): SRBlock[] {
     if (sep < 0) throw new Exit2(`error: parse ${searchLine}`);
     let end = -1;
     for (let j = sep + 1; j < n; j += 1) {
-      if (stripTail(lines[j]!) === '>>>>>>> REPLACE') {
+      if (trimEndWs(lines[j]!) === '>>>>>>> REPLACE') {
         end = j;
         break;
       }
@@ -982,7 +989,10 @@ function run(args: string[]): { code: number; out: string[] } {
   const rows: Array<{ key: string; line: string }> = [];
   const usedOld = new Set<string>();
   const usedNew = new Set<string>();
-  for (const [a, b] of tree.moves) {
+  // Newest move first: when two moves land on the same path (`a -> b`, delete `b`, `c -> b`), the
+  // later one is the move that actually put a file at `b`.
+  for (let i = tree.moves.length - 1; i >= 0; i -= 1) {
+    const [a, b] = tree.moves[i]!;
     if (usedOld.has(a) || usedNew.has(b)) continue;
     if (tree.original(a) === null) continue;
     if (tree.get(a) !== null) continue;
